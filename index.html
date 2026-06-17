@@ -525,10 +525,10 @@
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
-<script type="module">import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.9.0/firebase-app.js';
+<script type="module">import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js';
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc
-} from 'https://www.gstatic.com/firebasejs/11.9.0/firebase-firestore.js';
+} from 'https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBdZ264Yz_C-ev2BukH1z4cVDPaDr60wD0",
@@ -658,11 +658,73 @@ function localApi(method, path, body) {
 }
 
 // ── Sempre in modalità locale (standalone HTML) ──
-function api(method, path, body) {
-  return Promise.resolve(localApi(method, path, body));
-}
+
 
 // ── State ──
+
+// ── API FIREBASE (sostituisce localApi e api) ──────────────────
+async function api(method, path, body) {
+  setSyncing(true);
+  try {
+    if (method === 'GET' && path === '/api/state') {
+      const [mSnap, cSnap] = await Promise.all([
+        getDoc(DOC.members()), getDoc(DOC.checks())
+      ]);
+      const members = mSnap.exists() ? mSnap.data().list : [...DEFAULTMEMBERS];
+      const checks  = cSnap.exists() ? cSnap.data().list : [];
+      const itemsSnaps = await Promise.all(members.map(m => getDoc(DOC.items(m.id))));
+      const _memberItems = {};
+      itemsSnaps.forEach((snap, i) => {
+        _memberItems[members[i].id] = snap.exists() ? snap.data().list : [];
+      });
+      return { members, checks, items: [], _memberItems };
+    }
+    if (method === 'POST' && path === '/api/members') {
+      const mSnap = await getDoc(DOC.members());
+      const members = mSnap.exists() ? mSnap.data().list : [...DEFAULTMEMBERS];
+      const newId = members.reduce((max, m) => Math.max(max, m.id), 0) + 1;
+      const newMember = { id: newId, name: body.name, icon: body.icon };
+      members.push(newMember);
+      await setDoc(DOC.members(), { list: members });
+      await setDoc(DOC.items(newId), { list: [] });
+      return newMember;
+    }
+    if (method === 'PUT' && path.startsWith('/api/members/')) {
+      const id = parseInt(path.split('/').pop());
+      const mSnap = await getDoc(DOC.members());
+      const members = mSnap.data().list;
+      const idx = members.findIndex(m => m.id === id);
+      if (idx >= 0) { members[idx].name = body.name; members[idx].icon = body.icon; }
+      await setDoc(DOC.members(), { list: members });
+      return members[idx];
+    }
+    if (method === 'DELETE' && path.startsWith('/api/members/')) {
+      const id = parseInt(path.split('/').pop());
+      const mSnap = await getDoc(DOC.members());
+      const members = mSnap.data().list.filter(m => m.id !== id);
+      await setDoc(DOC.members(), { list: members });
+      await deleteDoc(DOC.items(id));
+      const cSnap = await getDoc(DOC.checks());
+      const checks = (cSnap.exists() ? cSnap.data().list : []).filter(c => c.memberId !== id);
+      await setDoc(DOC.checks(), { list: checks });
+      return null;
+    }
+    if (method === 'PUT' && path.startsWith('/api/checks/')) {
+      const parts = path.split('/');
+      const mId = parseInt(parts[3]), iId = parseInt(parts[4]);
+      const cSnap = await getDoc(DOC.checks());
+      const checks = cSnap.exists() ? cSnap.data().list : [];
+      const idx = checks.findIndex(c => c.memberId === mId && c.itemId === iId);
+      if (idx >= 0) checks[idx].checked = body.checked;
+      else checks.push({ memberId: mId, itemId: iId, checked: body.checked });
+      await setDoc(DOC.checks(), { list: checks });
+      return null;
+    }
+  } finally {
+    setSyncing(false);
+  }
+}
+
 let state = {
   members: [],
   items: [],
@@ -696,6 +758,11 @@ function applyState(data) {
   state.checks  = {};
   for (const c of data.checks) {
     state.checks[checksKey(c.memberId, c.itemId)] = c.checked;
+  }
+  if (data._memberItems) {
+    for (const [id, items] of Object.entries(data._memberItems)) {
+      state.memberItems[parseInt(id)] = items;
+    }
   }
   const savedOrder = lsGet(LS.memberOrder, null);
   if (savedOrder && savedOrder.length > 0) {
@@ -1100,18 +1167,6 @@ async function init() {
 }
 
 init();
-
-// ── PATCH applyState per Firebase memberItems ──────────────────
-const _origApplyState = applyState;
-function applyState(data) {
-  _origApplyState(data);
-  if (data._memberItems) {
-    for (const [id, items] of Object.entries(data._memberItems)) {
-      state.memberItems[parseInt(id)] = items;
-    }
-  }
-}
-
 
 // ── PATCH saveMemberItems per Firestore ────────────────────────
 const _origSaveMemberItems = saveMemberItems;
